@@ -1,5 +1,5 @@
 import streamlit as st
-import anthropic
+from groq import Groq
 import requests
 import json
 import zipfile
@@ -46,8 +46,8 @@ for key, default in [
     ("images", {}),
     ("custom_prompts", {}),
     ("analyzed", False),
-    ("img_width", 1024),
-    ("img_height", 576),
+    ("img_width", 1280),
+    ("img_height", 720),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -55,17 +55,18 @@ for key, default in [
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 def analyze_story(story: str, num_images: int, api_key: str) -> dict:
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
+
     system = (
         "You are an expert story analyst and visual director. "
-        "Respond ONLY with valid JSON, no markdown, no explanations."
+        "Respond ONLY with valid JSON. No markdown fences, no explanations, no extra text."
     )
-    user = f"""Analyze this story and create exactly {num_images} sequential scenes for image generation.
+    user = f"""Analyze the story below and produce exactly {num_images} sequential scenes for image generation.
 
 STORY:
 {story}
 
-Return ONLY a JSON object matching this exact structure (no extra keys):
+Return ONLY a valid JSON object with this exact structure:
 {{
   "main_characters": [
     {{
@@ -80,26 +81,29 @@ Return ONLY a JSON object matching this exact structure (no extra keys):
       "scene_number": 1,
       "title": "short scene title",
       "description": "1–2 sentences describing what happens",
-      "image_prompt": "COMPLETE prompt for image generation. Must include: character consistency details + specific action/emotion + environment details. ALWAYS append exactly: photorealistic DSLR photography, ultra-sharp focus, vibrant saturated colors, bright cheerful natural daylight, golden sunlight fill even indoors, high resolution 8K, professional color grading, cinematic composition"
+      "image_prompt": "COMPLETE image generation prompt. Must include: [character consistency details] + [specific action/emotion] + [environment details]. ALWAYS end with: photorealistic DSLR photography, ultra-sharp focus, vibrant saturated colors, bright cheerful natural daylight, golden sunlight fill even indoors, high resolution 8K, professional color grading, cinematic composition, 16:9 aspect ratio"
     }}
   ]
 }}
 
 STRICT RULES:
-1. Exactly {num_images} scenes, in chronological story order.
+1. Exactly {num_images} scenes in chronological story order.
 2. Every image_prompt MUST embed the character visual descriptions for consistency.
-3. Lighting must ALWAYS be bright, vivid, daylight — never dark, dim, moody, or shadowy — even for night scenes, basements, caves, or windowless rooms. Treat it as an always-on bright studio light + golden daylight.
-4. All images must look like real photographs shot with a DSLR camera.
-5. Return ONLY valid JSON."""
+3. Lighting must ALWAYS be bright, vivid, and daylit — NEVER dark, dim, moody, or shadowy — even for night scenes, basements, caves, or windowless rooms. Always treat it as bright golden daylight studio lighting.
+4. All images must resemble real photographs shot with a DSLR camera. No illustration, no painting, no anime.
+5. Return ONLY valid JSON, nothing else."""
 
-    msg = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=8096,
-        system=system,
-        messages=[{"role": "user", "content": user}],
+    completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        max_tokens=8192,
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
     )
-    raw = msg.content[0].text.strip()
-    # Strip markdown code fences if present
+    raw = completion.choices[0].message.content.strip()
+    # Strip markdown code fences if the model added them anyway
     if "```" in raw:
         raw = raw[raw.find("{") : raw.rfind("}") + 1]
     return json.loads(raw)
@@ -114,8 +118,8 @@ def generate_image(prompt: str, width: int, height: int, seed: int | None = None
         f"?model=flux&width={width}&height={height}&seed={seed}&nologo=true&enhance=true"
     )
     try:
-        resp = requests.get(url, timeout=150)
-        if resp.status_code == 200 and resp.content:
+        resp = requests.get(url, timeout=180)
+        if resp.status_code == 200 and len(resp.content) > 1000:
             return resp.content, seed
     except Exception:
         pass
@@ -125,30 +129,35 @@ def generate_image(prompt: str, width: int, height: int, seed: int | None = None
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Cài đặt")
-    api_key = st.text_input(
-        "🔑 Claude API Key",
+
+    groq_key = st.text_input(
+        "🔑 Groq API Key",
         type="password",
-        help="Lấy tại console.anthropic.com → API Keys",
+        help="Tạo tài khoản miễn phí tại console.groq.com → API Keys",
     )
-    st.caption("Dùng cho bước phân tích kịch bản.")
+    st.caption(
+        "Groq hoàn toàn **miễn phí** (14,400 requests/ngày).\n"
+        "Dùng model Llama 3.3 70B để phân tích kịch bản."
+    )
+    st.info("💡 Claude Max là gói đăng ký dùng web claude.ai — hoàn toàn tách biệt với Claude API (billing riêng). Groq thay thế hoàn toàn, miễn phí.")
 
     st.divider()
     st.markdown("**Tạo ảnh**")
-    st.success("✅ Pollinations.ai (miễn phí, không cần API key)\nModel: Flux — photorealistic")
+    st.success("✅ Pollinations.ai — Flux model\nMiễn phí, không cần API key, photorealistic")
 
     st.divider()
-    st.markdown("**Kích thước ảnh**")
-    ratio = st.selectbox(
-        "Tỉ lệ",
-        ["16:9 — Landscape (1024×576)", "4:3 (1024×768)", "1:1 Square (768×768)", "9:16 — Portrait (576×1024)"],
+    st.markdown("**Chất lượng ảnh (16:9)**")
+    quality = st.radio(
+        "Độ phân giải",
+        ["1280×720 — HD (khuyên dùng)", "1920×1080 — Full HD (chậm hơn)", "1024×576 — Nhanh"],
+        index=0,
     )
-    dim_map = {
-        "16:9 — Landscape (1024×576)": (1024, 576),
-        "4:3 (1024×768)": (1024, 768),
-        "1:1 Square (768×768)": (768, 768),
-        "9:16 — Portrait (576×1024)": (576, 1024),
+    res_map = {
+        "1280×720 — HD (khuyên dùng)": (1280, 720),
+        "1920×1080 — Full HD (chậm hơn)": (1920, 1080),
+        "1024×576 — Nhanh": (1024, 576),
     }
-    st.session_state.img_width, st.session_state.img_height = dim_map[ratio]
+    st.session_state.img_width, st.session_state.img_height = res_map[quality]
 
     st.divider()
     if st.session_state.analyzed:
@@ -160,7 +169,9 @@ with st.sidebar:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 st.title("🎬 Story → Image Generator")
-st.markdown("Đưa kịch bản vào, Claude phân tích tự động, rồi tạo loạt ảnh nhất quán theo từng phân cảnh.")
+st.markdown(
+    "Dán kịch bản vào → AI phân tích nhân vật & chia phân cảnh → tạo loạt ảnh nhất quán theo thứ tự câu chuyện."
+)
 
 tab_input, tab_scenes, tab_download = st.tabs(["📖 Kịch bản", "🖼️ Phân cảnh & Ảnh", "⬇️ Tải về"])
 
@@ -173,7 +184,7 @@ with tab_input:
         height=420,
         placeholder=(
             "Dán toàn bộ nội dung câu chuyện hoặc kịch bản vào đây.\n"
-            "Claude sẽ tự động nhận diện nhân vật, chia phân cảnh và tạo prompt ảnh."
+            "AI sẽ tự động nhận diện nhân vật, chia phân cảnh và viết prompt ảnh."
         ),
     )
 
@@ -182,20 +193,20 @@ with tab_input:
         num_images = st.number_input("Số ảnh cần tạo", min_value=1, max_value=60, value=10, step=1)
 
     with col_btn:
-        analyze_disabled = not (story.strip() and api_key.strip())
+        analyze_disabled = not (story.strip() and groq_key.strip())
         analyze_btn = st.button(
-            "🔍 Phân tích kịch bản bằng Claude",
+            "🔍 Phân tích kịch bản (Llama 3.3 70B — miễn phí)",
             type="primary",
             disabled=analyze_disabled,
             use_container_width=True,
         )
-        if analyze_disabled and not api_key.strip():
-            st.caption("⚠️ Nhập Claude API Key trong sidebar trước.")
+        if analyze_disabled and not groq_key.strip():
+            st.caption("⚠️ Nhập Groq API Key trong sidebar trước (miễn phí tại console.groq.com).")
 
     if analyze_btn:
-        with st.spinner("Claude đang đọc và phân tích kịch bản…"):
+        with st.spinner("AI đang đọc và phân tích kịch bản…"):
             try:
-                data = analyze_story(story.strip(), num_images, api_key.strip())
+                data = analyze_story(story.strip(), num_images, groq_key.strip())
                 st.session_state.scenes = data["scenes"]
                 st.session_state.characters = data["main_characters"]
                 st.session_state.char_prompt = data.get("character_consistency_prompt", "")
@@ -219,9 +230,7 @@ with tab_input:
                 st.info("Chuyển sang tab **🖼️ Phân cảnh & Ảnh** để tạo ảnh.")
 
             except json.JSONDecodeError:
-                st.error("Claude trả về dữ liệu không đúng JSON. Thử lại lần nữa.")
-            except anthropic.AuthenticationError:
-                st.error("API Key không hợp lệ. Kiểm tra lại trong sidebar.")
+                st.error("AI trả về dữ liệu không đúng JSON. Thử lại lần nữa.")
             except Exception as e:
                 st.error(f"Lỗi: {e}")
 
@@ -242,7 +251,7 @@ with tab_scenes:
     # Header bar
     hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
     with hcol1:
-        st.markdown(f"**{n_scenes} phân cảnh** · Thể loại: *{st.session_state.genre}* · Kích thước: {w}×{h}")
+        st.markdown(f"**{n_scenes} phân cảnh** · Thể loại: *{st.session_state.genre}* · {w}×{h} px (16:9)")
     with hcol2:
         st.metric("Đã tạo", f"{n_done}/{n_scenes}")
     with hcol3:
@@ -260,7 +269,7 @@ with tab_scenes:
             else:
                 st.warning(f"Phân cảnh {i + 1}: tạo ảnh thất bại, thử lại sau.")
             progress.progress((i + 1) / n_scenes)
-            time.sleep(0.3)
+            time.sleep(0.5)
         status.markdown("✅ Tạo xong!")
         st.rerun()
 
@@ -312,7 +321,7 @@ with tab_scenes:
                         '<div class="placeholder-box">Chưa có ảnh</div>',
                         unsafe_allow_html=True,
                     )
-                    if st.button(f"▶️ Tạo ảnh này", key=f"gen_single_{si}", use_container_width=True):
+                    if st.button("▶️ Tạo ảnh này", key=f"gen_single_{si}", use_container_width=True):
                         with st.spinner("Đang tạo…"):
                             img_bytes, seed = generate_image(current_prompt, w, h)
                             if img_bytes:
@@ -325,7 +334,7 @@ with tab_scenes:
                             else:
                                 st.error("Tạo ảnh thất bại, thử lại.")
 
-                # Prompt editor (shown when toggled)
+                # Prompt editor (toggled)
                 if st.session_state.get(f"prompt_open_{si}", False):
                     new_prompt = st.text_area(
                         "Chỉnh sửa prompt rồi tạo lại:",
@@ -367,7 +376,6 @@ with tab_download:
         n_total = len(st.session_state.scenes)
         st.markdown(f"**{n_ready}/{n_total} ảnh** sẵn sàng để tải.")
 
-        # Build ZIP in memory
         zip_buf = BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for idx, img_info in sorted(st.session_state.images.items()):
@@ -392,7 +400,11 @@ with tab_download:
             scene = st.session_state.scenes[idx]
             c1, c2 = st.columns([1, 2])
             with c1:
-                st.image(img_info["data"], caption=f"Cảnh {scene['scene_number']}: {scene['title']}", use_container_width=True)
+                st.image(
+                    img_info["data"],
+                    caption=f"Cảnh {scene['scene_number']}: {scene['title']}",
+                    use_container_width=True,
+                )
             with c2:
                 st.markdown(f"**Cảnh {scene['scene_number']}: {scene['title']}**")
                 st.markdown(scene["description"])
