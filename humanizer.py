@@ -42,6 +42,20 @@ for key, default in [
         st.session_state[key] = default
 
 
+def extract_filename_from_html(html: str) -> str:
+    """Extract H1 title from HTML and convert to slug for filename."""
+    match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
+    if match:
+        title = re.sub(r'<[^>]+>', '', match.group(1)).strip()
+        slug = title.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'[\s]+', '-', slug).strip('-')
+        slug = re.sub(r'-+', '-', slug)
+        if slug:
+            return f"{slug}.html"
+    return "humanized_article.html"
+
+
 def add_log(message: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     st.session_state.logs.append(f"[{timestamp}] [{level}] {message}")
@@ -104,16 +118,16 @@ CRITICAL: WHAT TO REWRITE vs WHAT TO PRESERVE
 
 ✅ REWRITE THESE (make them sound human):
 - <p> paragraph text content
-- <h1>, <h2>, <h3> heading text content
+- <h2>, <h3> heading text content
 - <li> list item text content
 - Text inside <strong>, <em>, <a> tags (rewrite the text, keep the tags)
 
 🚫 DO NOT TOUCH — PRESERVE 100% EXACTLY:
+- <h1> title — NEVER change the H1 text. Keep it exactly as-is, character for character.
+- ALL HTML comments (<!-- anything -->) — especially the metadata block at the top of the article (URL slug, meta title, meta description, image notes, etc.). Copy them EXACTLY, do not modify a single character.
 - ALL HTML tags, attributes, inline styles, classes (keep every tag identical)
-- HTML comments (<!-- anything -->)
 - Photo credits: "Photo by X on Pexels", "Image by X on Unsplash", etc.
 - <img> tags and their alt text, src URLs
-- Metadata in comments (URL slug, meta title, meta description, dates, author)
 - Numbers: prices ($500, $1,500), percentages (25%, 30-40%), statistics, dates
 - Proper nouns: person names, brand names (Aldi, Costco, Wharton, USDA), product names, place names
 - Navigation elements, buttons, disclaimers, copyright notices
@@ -342,10 +356,11 @@ with col_output:
         out_words = count_words(st.session_state.result_text)
         st.caption(f"{out_words:,} words")
 
+        dl_filename = extract_filename_from_html(st.session_state.result_text)
         st.download_button(
-            label="Download HTML",
+            label=f"Download: {dl_filename}",
             data=st.session_state.result_text,
-            file_name="humanized_article.html",
+            file_name=dl_filename,
             mime="text/html",
             use_container_width=True,
         )
