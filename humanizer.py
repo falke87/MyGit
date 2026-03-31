@@ -1,5 +1,5 @@
 import streamlit as st
-import anthropic
+from groq import Groq
 import time
 import re
 from datetime import datetime
@@ -41,11 +41,7 @@ def count_words(text: str) -> int:
 
 
 def split_html_into_sections(html: str) -> list[str]:
-    """Split HTML into sections at <h2> boundaries for chunk processing.
-    Each section includes content from one <h2> to the next (or end).
-    Leading content before the first <h2> is its own section.
-    """
-    # Find all h2 positions
+    """Split HTML into sections at <h2> boundaries for chunk processing."""
     h2_pattern = re.compile(r'(?=<h2[\s>])', re.IGNORECASE)
     positions = [m.start() for m in h2_pattern.finditer(html)]
 
@@ -53,11 +49,9 @@ def split_html_into_sections(html: str) -> list[str]:
         return [html]
 
     sections = []
-    # Content before first h2
     if positions[0] > 0:
         sections.append(html[:positions[0]])
 
-    # Each h2 section
     for i, pos in enumerate(positions):
         end = positions[i + 1] if i + 1 < len(positions) else len(html)
         sections.append(html[pos:end])
@@ -65,7 +59,7 @@ def split_html_into_sections(html: str) -> list[str]:
     return sections
 
 
-def build_chunks(html: str, max_words: int = 1500) -> list[str]:
+def build_chunks(html: str, max_words: int = 1200) -> list[str]:
     """Build chunks from HTML sections, merging small sections together."""
     sections = split_html_into_sections(html)
     chunks = []
@@ -137,8 +131,8 @@ OUTPUT FORMAT
 Return ONLY the rewritten HTML. No explanations, no markdown fences, no "Here's the rewritten version:" prefix. Just the HTML with humanized text content and all structure preserved exactly."""
 
 
-def humanize_chunk(client: anthropic.Anthropic, chunk: str, chunk_num: int, total_chunks: int, context_summary: str = "") -> str:
-    """Rewrite a single HTML chunk using Claude Sonnet."""
+def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, context_summary: str = "") -> str:
+    """Rewrite a single HTML chunk using Groq Llama."""
     add_log(f"Processing chunk {chunk_num}/{total_chunks} ({count_words(chunk)} words)")
 
     user_message = ""
@@ -147,23 +141,21 @@ def humanize_chunk(client: anthropic.Anthropic, chunk: str, chunk_num: int, tota
     user_message += chunk
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=16384,
-            temperature=1.0,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=8192,
+            temperature=0.9,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
         )
-        result = response.content[0].text
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        add_log(f"Chunk {chunk_num} done — {input_tokens} in / {output_tokens} out tokens")
+        result = response.choices[0].message.content
+        usage = response.usage
+        add_log(f"Chunk {chunk_num} done — {usage.prompt_tokens} in / {usage.completion_tokens} out tokens")
         return result
-    except anthropic.APIError as e:
-        add_log(f"API error on chunk {chunk_num}: {e}", "ERROR")
-        raise
     except Exception as e:
-        add_log(f"Unexpected error on chunk {chunk_num}: {e}", "ERROR")
+        add_log(f"Error on chunk {chunk_num}: {e}", "ERROR")
         raise
 
 
@@ -171,7 +163,6 @@ def extract_summary(html_chunk: str) -> str:
     """Extract a brief text summary from an HTML chunk for context passing."""
     clean = re.sub(r'<[^>]+>', ' ', html_chunk)
     clean = re.sub(r'\s+', ' ', clean).strip()
-    # Take last ~200 chars as context hint
     if len(clean) > 200:
         clean = clean[-200:]
     return clean
@@ -180,18 +171,19 @@ def extract_summary(html_chunk: str) -> str:
 def humanize_text(api_key: str, text: str, progress_bar, status_text, log_placeholder) -> str:
     """Main function to humanize the full HTML text."""
     st.session_state.logs = []
-    client = anthropic.Anthropic(api_key=api_key)
+    client = Groq(api_key=api_key)
 
     word_count = count_words(text)
     add_log(f"Starting humanization: {word_count} words")
-    add_log(f"Input format: HTML detected" if "<" in text else "Input format: plain text")
+    add_log("Model: Llama 3.3 70B (Groq)")
+    add_log(f"Input format: {'HTML detected' if '<' in text else 'plain text'}")
     log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
 
-    if word_count <= 2000:
+    if word_count <= 1500:
         chunks = [text]
         add_log("Text fits in single pass")
     else:
-        chunks = build_chunks(text, max_words=1500)
+        chunks = build_chunks(text, max_words=1200)
         add_log(f"Split into {len(chunks)} chunks by H2 sections")
         for i, c in enumerate(chunks):
             add_log(f"  Chunk {i+1}: {count_words(c)} words")
@@ -237,23 +229,26 @@ def humanize_text(api_key: str, text: str, progress_bar, status_text, log_placeh
 def format_logs() -> str:
     if not st.session_state.logs:
         return '<div class="log-box">Waiting...</div>'
-    log_lines = st.session_state.logs
-    lines = "\n".join(log_lines)
+    lines = "\n".join(st.session_state.logs)
     return f'<div class="log-box">{lines}</div>'
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Settings")
-    api_key = st.text_input("Anthropic API Key", type="password", help="Get your key at console.anthropic.com")
-    st.caption("Uses **Claude Sonnet** for rewriting.")
+    api_key = st.text_input(
+        "Groq API Key",
+        type="password",
+        help="Free key at console.groq.com → API Keys",
+    )
+    st.caption("**Free** — Groq + Llama 3.3 70B (14,400 req/day)")
     st.divider()
 
     st.markdown("**How it works**")
     st.markdown(
         "1. Paste HTML article (AI-generated)\n"
         "2. HTML is split into chunks by H2 sections\n"
-        "3. Claude Sonnet rewrites text content only\n"
+        "3. Llama 3.3 70B rewrites text content only\n"
         "4. HTML structure, metadata, images preserved"
     )
     st.divider()
@@ -307,7 +302,7 @@ with col_input:
         can_run = bool(input_text.strip() and api_key.strip() and word_count <= 10000)
         run_btn = st.button("Humanize", type="primary", disabled=not can_run, use_container_width=True)
         if not api_key.strip():
-            st.caption("Enter API key in sidebar first.")
+            st.caption("Enter Groq API key in sidebar (free).")
 
 with col_output:
     st.markdown("### Output (HTML)")
@@ -338,7 +333,7 @@ with col_output:
             label_visibility="collapsed",
         )
 
-# ── Preview tab ────────────────────────────────────────────────────────────
+# ── Preview ────────────────────────────────────────────────────────────────
 if st.session_state.result_text:
     with st.expander("Preview rendered HTML"):
         st.components.v1.html(st.session_state.result_text, height=800, scrolling=True)
@@ -357,15 +352,13 @@ if run_btn:
         result = humanize_text(api_key, input_text, progress_bar, status_text, log_placeholder)
         st.session_state.result_text = result
         st.rerun()
-    except anthropic.AuthenticationError:
-        st.error("Invalid API key. Check your Anthropic API key.")
-        add_log("Authentication failed - invalid API key", "ERROR")
-        log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
-    except anthropic.RateLimitError:
-        st.error("Rate limited. Wait a moment and try again.")
-        add_log("Rate limited by API", "ERROR")
-        log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
     except Exception as e:
-        st.error(f"Error: {e}")
-        add_log(f"Fatal error: {e}", "ERROR")
+        error_msg = str(e)
+        if "authentication" in error_msg.lower() or "api key" in error_msg.lower() or "401" in error_msg:
+            st.error("Invalid API key. Check your Groq API key at console.groq.com")
+        elif "rate" in error_msg.lower() or "429" in error_msg:
+            st.error("Rate limited. Wait a moment and try again.")
+        else:
+            st.error(f"Error: {e}")
+        add_log(f"Error: {e}", "ERROR")
         log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
