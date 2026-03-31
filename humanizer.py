@@ -2,7 +2,21 @@ import streamlit as st
 from groq import Groq
 import time
 import re
+import os
 from datetime import datetime
+from pathlib import Path
+
+# ── Load API key from .env file ───────────────────────────────────────────
+def load_api_key() -> str:
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("GROQ_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return os.environ.get("GROQ_API_KEY", "")
+
+DEFAULT_API_KEY = load_api_key()
 
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Humanizer", page_icon="✍️", layout="wide")
@@ -131,8 +145,8 @@ OUTPUT FORMAT
 Return ONLY the rewritten HTML. No explanations, no markdown fences, no "Here's the rewritten version:" prefix. Just the HTML with humanized text content and all structure preserved exactly."""
 
 
-def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, context_summary: str = "") -> str:
-    """Rewrite a single HTML chunk using Groq Llama."""
+def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, context_summary: str = "", log_placeholder=None) -> str:
+    """Rewrite a single HTML chunk using Groq Llama, with auto-retry on rate limit."""
     add_log(f"Processing chunk {chunk_num}/{total_chunks} ({count_words(chunk)} words)")
 
     user_message = ""
@@ -140,23 +154,34 @@ def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, 
         user_message += f"[CONTEXT — the article section right before this one discussed: {context_summary}. Use this for tone/flow continuity only. Do NOT repeat or rewrite it.]\n\n"
     user_message += chunk
 
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=8192,
-            temperature=0.9,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-        )
-        result = response.choices[0].message.content
-        usage = response.usage
-        add_log(f"Chunk {chunk_num} done — {usage.prompt_tokens} in / {usage.completion_tokens} out tokens")
-        return result
-    except Exception as e:
-        add_log(f"Error on chunk {chunk_num}: {e}", "ERROR")
-        raise
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                max_tokens=8192,
+                temperature=0.9,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+            )
+            result = response.choices[0].message.content
+            usage = response.usage
+            add_log(f"Chunk {chunk_num} done — {usage.prompt_tokens} in / {usage.completion_tokens} out tokens")
+            return result
+        except Exception as e:
+            error_msg = str(e)
+            is_rate_limit = "rate" in error_msg.lower() or "429" in error_msg
+            if is_rate_limit and attempt < max_retries - 1:
+                wait = [15, 30, 60, 90][attempt]
+                add_log(f"Rate limited — waiting {wait}s before retry ({attempt+1}/{max_retries})", "WARN")
+                if log_placeholder:
+                    log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
+                time.sleep(wait)
+            else:
+                add_log(f"Error on chunk {chunk_num}: {e}", "ERROR")
+                raise
 
 
 def extract_summary(html_chunk: str) -> str:
@@ -200,7 +225,7 @@ def humanize_text(api_key: str, text: str, progress_bar, status_text, log_placeh
         log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
 
         context = extract_summary(results[-1]) if results else ""
-        result = humanize_chunk(client, chunk, chunk_num, total, context)
+        result = humanize_chunk(client, chunk, chunk_num, total, context, log_placeholder)
         results.append(result)
 
         log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
@@ -238,10 +263,11 @@ with st.sidebar:
     st.title("Settings")
     api_key = st.text_input(
         "Groq API Key",
+        value=DEFAULT_API_KEY,
         type="password",
-        help="Free key at console.groq.com → API Keys",
+        help="Pre-configured. Change if needed.",
     )
-    st.caption("**Free** — Groq + Llama 3.3 70B (14,400 req/day)")
+    st.caption("**Free** — Groq + Llama 3.3 70B")
     st.divider()
 
     st.markdown("**How it works**")
@@ -302,7 +328,7 @@ with col_input:
         can_run = bool(input_text.strip() and api_key.strip() and word_count <= 10000)
         run_btn = st.button("Humanize", type="primary", disabled=not can_run, use_container_width=True)
         if not api_key.strip():
-            st.caption("Enter Groq API key in sidebar (free).")
+            st.caption("API key missing — check sidebar.")
 
 with col_output:
     st.markdown("### Output (HTML)")
