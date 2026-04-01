@@ -87,7 +87,7 @@ def split_html_into_sections(html: str) -> list[str]:
     return sections
 
 
-def build_chunks(html: str, max_words: int = 1200) -> list[str]:
+def build_chunks(html: str, max_words: int = 600) -> list[str]:
     """Build chunks from HTML sections, merging small sections together."""
     sections = split_html_into_sections(html)
     chunks = []
@@ -110,53 +110,15 @@ def build_chunks(html: str, max_words: int = 1200) -> list[str]:
     return chunks
 
 
-SYSTEM_PROMPT = """You are an expert human writer who rewrites AI-generated HTML articles to sound completely natural and human-written. Your goal is to make the text undetectable by AI detection tools (GPTZero, Originality.ai, Turnitin, etc.) while preserving the original meaning.
+SYSTEM_PROMPT = """Rewrite AI-generated HTML to sound human. Beat AI detectors (GPTZero, Turnitin, Originality.ai).
 
-═══════════════════════════════════════════
-CRITICAL: WHAT TO REWRITE vs WHAT TO PRESERVE
-═══════════════════════════════════════════
+REWRITE: <p>, <h2>, <h3> text, <li> items, text in <strong>/<em>/<a> tags.
 
-✅ REWRITE THESE (make them sound human):
-- <p> paragraph text content
-- <h2>, <h3> heading text content
-- <li> list item text content
-- Text inside <strong>, <em>, <a> tags (rewrite the text, keep the tags)
+NEVER TOUCH: <h1> title (keep exact), HTML comments (<!-- -->), all HTML tags/attributes/styles, photo credits, <img> tags, URLs, numbers/prices/percentages/dates, proper nouns (names, brands, places), tables, footer, code blocks, disclaimers, quotes.
 
-🚫 DO NOT TOUCH — PRESERVE 100% EXACTLY:
-- <h1> title — NEVER change the H1 text. Keep it exactly as-is, character for character.
-- ALL HTML comments (<!-- anything -->) — especially the metadata block at the top of the article (URL slug, meta title, meta description, image notes, etc.). Copy them EXACTLY, do not modify a single character.
-- ALL HTML tags, attributes, inline styles, classes (keep every tag identical)
-- Photo credits: "Photo by X on Pexels", "Image by X on Unsplash", etc.
-- <img> tags and their alt text, src URLs
-- Numbers: prices ($500, $1,500), percentages (25%, 30-40%), statistics, dates
-- Proper nouns: person names, brand names (Aldi, Costco, Wharton, USDA), product names, place names
-- Navigation elements, buttons, disclaimers, copyright notices
-- Quotes and testimonials
-- Code blocks
-- <table> content (keep all table data exactly as-is)
-- Tip/callout boxes (<div> with border-left styling) — rewrite the advice text naturally but keep the exact formatting, icons, and <strong> label
-- Footer/author sections
-- Internal link placeholders/comments
-- Any URLs or href values
+STYLE: Vary sentence length (mix short+long). Use simple words. Never use: delve, crucial, comprehensive, leverage, utilize, moreover, furthermore, robust, streamline, pivotal, foster, elevate, harness, navigate. Use casual connectors (but, so, though, honestly, look, the thing is). Add human touches: rhetorical questions, asides, start with And/But. Be direct, opinionated, like a friend. Vary paragraph length. Same language as input.
 
-═══════════════════════════════════════════
-REWRITING STYLE RULES
-═══════════════════════════════════════════
-
-1. SENTENCE STRUCTURE: Vary lengths dramatically. Mix punchy short sentences (3-6 words) with longer flowing ones. Real humans are unpredictable.
-2. WORD CHOICE: Use everyday words. NEVER use these AI-typical words/phrases: "delve", "crucial", "comprehensive", "facilitate", "leverage", "utilize", "moreover", "furthermore", "it's important to note", "in conclusion", "landscape", "paradigm", "multifaceted", "nuanced", "robust", "streamline", "harness", "navigate", "realm", "foster", "elevate", "pivotal".
-3. TRANSITIONS: Natural connectors only: "but", "and", "so", "though", "anyway", "honestly", "the thing is", "look", "here's the deal", "thing is". Kill mechanical transitions.
-4. HUMAN TOUCHES: Parenthetical asides, rhetorical questions, mild opinions, starting sentences with "And" or "But". Humans aren't perfectly polished.
-5. FLOW: Break predictable patterns. Digress slightly, circle back, emphasize unexpectedly. Don't follow a rigid template.
-6. TONE: Knowledgeable friend, not textbook. Direct. Sometimes opinionated.
-7. PARAGRAPHS: Vary length. One-sentence paragraphs are fine. Long ones too.
-8. LANGUAGE: Write in the SAME language as the input. Vietnamese stays Vietnamese, English stays English.
-
-═══════════════════════════════════════════
-OUTPUT FORMAT
-═══════════════════════════════════════════
-
-Return ONLY the rewritten HTML. No explanations, no markdown fences, no "Here's the rewritten version:" prefix. Just the HTML with humanized text content and all structure preserved exactly."""
+OUTPUT: Only rewritten HTML. No explanations, no markdown fences."""
 
 
 def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, context_summary: str = "", log_placeholder=None) -> str:
@@ -173,7 +135,7 @@ def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, 
         try:
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                max_tokens=8192,
+                max_tokens=4096,
                 temperature=0.9,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -186,9 +148,9 @@ def humanize_chunk(client: Groq, chunk: str, chunk_num: int, total_chunks: int, 
             return result
         except Exception as e:
             error_msg = str(e)
-            is_rate_limit = "rate" in error_msg.lower() or "429" in error_msg
+            is_rate_limit = "rate" in error_msg.lower() or "429" in error_msg or "413" in error_msg
             if is_rate_limit and attempt < max_retries - 1:
-                wait = [15, 30, 60, 90][attempt]
+                wait = [65, 65, 70, 75][attempt]
                 add_log(f"Rate limited — waiting {wait}s before retry ({attempt+1}/{max_retries})", "WARN")
                 if log_placeholder:
                     log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
@@ -218,11 +180,10 @@ def humanize_text(api_key: str, text: str, progress_bar, status_text, log_placeh
     add_log(f"Input format: {'HTML detected' if '<' in text else 'plain text'}")
     log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
 
-    if word_count <= 1500:
-        chunks = [text]
+    chunks = build_chunks(text, max_words=600)
+    if len(chunks) == 1:
         add_log("Text fits in single pass")
     else:
-        chunks = build_chunks(text, max_words=1200)
         add_log(f"Split into {len(chunks)} chunks by H2 sections")
         for i, c in enumerate(chunks):
             add_log(f"  Chunk {i+1}: {count_words(c)} words")
@@ -234,6 +195,14 @@ def humanize_text(api_key: str, text: str, progress_bar, status_text, log_placeh
 
     for i, chunk in enumerate(chunks):
         chunk_num = i + 1
+
+        # Wait 65s between chunks to reset Groq TPM counter
+        if i > 0:
+            add_log(f"Waiting 65s for rate limit reset...")
+            log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
+            status_text.markdown(f"Waiting 65s before chunk **{chunk_num}/{total}**...")
+            time.sleep(65)
+
         status_text.markdown(f"Rewriting chunk **{chunk_num}/{total}**...")
         progress_bar.progress(i / total)
         log_placeholder.markdown(format_logs(), unsafe_allow_html=True)
